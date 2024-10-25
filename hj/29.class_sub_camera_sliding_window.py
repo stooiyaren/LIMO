@@ -1,0 +1,154 @@
+import rospy
+import cv2
+from sensor_msgs.msg import CompressedImage
+from geometry_msgs.msg import Twist
+from cv_bridge import CvBridge
+import numpy as np
+
+# color index
+black =(0,0,0)
+red = (0,0,255)
+yellow = (0,255,255)
+green = (0,255,0)
+cyan = (255,255,0)
+blue = (255,0,0)
+purple = (255,0,255)
+white = (255,255,255)
+#-----------------------------
+
+
+
+class Class_sub:
+    def __init__(self):
+        rospy.init_node("wego_sub_node")
+        rospy.Subscriber("/camera/rgb/image_raw/compressed", CompressedImage, self.camera_cb)
+        self.pub = rospy.Publisher("/cmd_vel",Twist, queue_size= 1)
+        self.cmd_msg = Twist()
+        self.bridge = CvBridge()
+
+    def camera_cb(self, msg):
+        cv_img = self.bridge.compressed_imgmsg_to_cv2(msg)
+        
+        y, x, channel = cv_img.shape
+
+        hsv_img = cv2.cvtColor(cv_img,cv2.COLOR_BGR2HSV)
+
+
+        # white_lower = np.array([0,0,150])
+        # white_upper = np.array([179,20,255])
+        # white_filter = cv2.inRange(hsv_img, white_lower, white_upper)
+
+        # we will find yellow color in picture
+        yellow_lower = np.array([15, 60, 60])
+        yellow_upper = np.array([45, 255, 255])
+        yellow_filter = cv2.inRange(hsv_img, yellow_lower,yellow_upper)
+
+        # combine_filter = cv2.bitwise_or(white_filter, yellow_filter)
+
+        # get only yellow color in picture
+        and_img = cv2.bitwise_and(cv_img,cv_img,mask=yellow_filter)
+
+
+        #just pick 4 points in picture
+        margin_x = 250
+        margin_y = 300
+        src_pt1 = (0,y)
+        src_pt2 = (margin_x,margin_y)
+        src_pt3 = (x-margin_x,margin_y)
+        src_pt4 = (x,y)
+        src_pts = np.float32([src_pt1,src_pt2,src_pt3,src_pt4])
+
+        dst_margin_x = 120
+        dst_pt1 = (dst_margin_x,y)
+        dst_pt2 = (dst_margin_x,0)
+        dst_pt3 = (x - dst_margin_x,0)
+        dst_pt4 = (x-dst_margin_x,y)
+        dst_pts = np.float32([dst_pt1,dst_pt2,dst_pt3,dst_pt4])
+        
+        matrix = cv2.getPerspectiveTransform(src_pts,dst_pts)
+        rmatrix = cv2.getPerspectiveTransform(dst_pts,src_pts)
+
+        warp_img = cv2.warpPerspective(and_img, matrix, (x,y))
+        gray_img = cv2.cvtColor(warp_img, cv2.COLOR_BGR2GRAY)
+        bin_img = np.zeros_like(gray_img)
+        bin_img[gray_img != 0] = 1
+
+        # histogram = np.sum(bin_img, axis= 0)
+        center_index = x//2
+        # left_side = histogram[:center_index]
+        # right_side = histogram[center_index:]
+        # max_left_index = np.argmax(left_side)
+        # max_right_index = np.argmax(right_side)+center_index
+
+        # avg_index = (max_left_index + max_right_index)//2
+
+        window_num = 8
+        margin = 40
+        window_y_size = y//window_num
+        left_indexes = []
+        right_indexes = []
+        for i in range(0,window_num):
+            upper_y = y-window_y_size*(i+1)
+            lower_y = y-window_y_size*i
+
+            left_window = bin_img[upper_y:lower_y,:center_index]
+            left_histogram = np.sum(left_window, axis = 0)
+            left_histogram[left_histogram<50] = 0
+
+            right_window = bin_img[upper_y:lower_y, :center_index]
+            right_histogram = np.sum(right_window, axis = 0)
+            right_histogram[right_histogram<50] = 0
+
+            try:
+                left_nonzero = np.nonzero(left_histogram)[0]
+                left_avg_index = (left_nonzero[0] + left_nonzero[-1])//2
+                left_indexes.append(left_avg_index)
+
+                right_nonzero = np.nonzero(right_histogram)[0]              
+                right_avg_index = (right_nonzero[0] + right_nonzero[-1])//2 + center_index
+                right_indexes.append(right_avg_index)
+
+                cv2.line(warp_img,(left_avg_index,y-window_y_size*(i+1) + window_y_size//2),(left_avg_index, y-window_y_size*(i+1)+window_y_size//2),red,10)
+                cv2.line(warp_img,(right_avg_index,y-window_y_size*(i+1) + window_y_size//2),(right_avg_index, y-window_y_size*(i+1)+window_y_size//2),blue,10)
+                cv2.rectangle(warp_img, (left_avg_index - margin, upper_y),(left_avg_index + margin,lower_y),blue,3)
+                cv2.rectangle(warp_img, (right_avg_index - margin, upper_y),(right_avg_index + margin,lower_y),red,3)
+            
+            except:
+                pass
+
+        left_avg_indexes = np.average(left_indexes)
+        right_avg_indexes = np.average(right_indexes)
+        avg_indexes = int((left_avg_indexes + right_avg_indexes)//2)
+        
+        cv2.line(warp_img,(center_index,0),(center_index,y), green, 3)
+        cv2.line(warp_img,(avg_indexes,0),(avg_indexes,y), yellow, 3)    
+
+        error_index = (center_index - avg_indexes)
+        self.cmd_msg.linear.x = 0.1
+        self.cmd_msg.angular.z = error_index*0.01
+        self.pub.publish(self.cmd_msg)
+
+        rwarp_img = cv2.warpPerspective(warp_img,rmatrix,(x,y))
+
+        # cv2.line(warp_img,(max_left_index,0),(max_left_index,y),red,3)
+        # cv2.line(warp_img,(max_right_index,0),(max_right_index,y),blue,3)
+        # cv2.line(warp_img,(avg_index,0),(avg_index,y),yellow,3)
+        # cv2.line(warp_img,(center_index,0),(center_index,y), green, 3)
+
+        cv2.circle(cv_img, src_pt1,20, blue, -1)
+        cv2.circle(cv_img, src_pt2,20, green, -1)
+        cv2.circle(cv_img, src_pt3,20, red, -1)
+        cv2.circle(cv_img, src_pt4,20, yellow, -1)
+
+
+
+        cv2.imshow("cv_img", cv_img)
+        # cv2.imshow("and_img", and_img)
+        cv2.imshow('warp_img', warp_img)
+        # cv2.imshow("gray_img", gray_img)
+        # cv2.imshow('bin_img', bin_img)
+        cv2.imshow('rwarp_img',rwarp_img)
+        cv2.waitKey(1)
+    
+class_sub = Class_sub()
+rospy.spin()
